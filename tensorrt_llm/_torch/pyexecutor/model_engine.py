@@ -94,6 +94,7 @@ from .resource_manager import (BaseResourceManager, KVCacheManager,
 from .sampler import SampleStateTensors
 from .sampler.ops.flashinfer import warmup_sampling_module
 from .scheduler import ScheduledRequests
+from .startup_timing import startup_timing
 from .trace_log_utils import log_mem_snapshot
 
 
@@ -1255,7 +1256,7 @@ class PyTorchModelEngine(ModelEngine):
         # warmup is skipped: only the advanced-sampling CUDA graph capture pass
         # exercises the non-greedy sampler, so with cuda_graph_config=None
         # flashinfer's sampling kernels would be JIT-built mid-serving.
-        with nvtx_range("startup.sampling_warmup", color="purple"):
+        with startup_timing("startup.sampling_warmup", color="purple"):
             warmup_sampling_module()
 
         kv_cache_manager = resource_manager.get_resource_manager(
@@ -1295,7 +1296,7 @@ class PyTorchModelEngine(ModelEngine):
         self._prewarm_cute_dsl_indexer_q()
         log_mem_snapshot("warmup/after_cute_dsl_indexer_q")
         if not is_enc_dec:
-            with nvtx_range("startup.attention_warmup", color="yellow"):
+            with startup_timing("startup.attention_warmup", color="yellow"):
                 self._run_attention_warmup(resource_manager,
                                            can_run_general_warmup)
 
@@ -1305,8 +1306,8 @@ class PyTorchModelEngine(ModelEngine):
                 resource_manager)
             # Currently graph has not been captured, disable cuda graph for this warmup.
             with self.no_cuda_graph():
-                with nvtx_range("startup.torch_compile_general_warmup",
-                                color="blue"):
+                with startup_timing("startup.torch_compile_general_warmup",
+                                    color="blue"):
                     self._general_warmup(resource_manager,
                                          warmup_requests_configs)
                     # Release C++ MoE workspace buffers so the autotuner can
@@ -1321,7 +1322,7 @@ class PyTorchModelEngine(ModelEngine):
         # Helix CP is decode-only and runs into issues with the
         # autotuner warmup's context requests.
         if not is_enc_dec and not self.mapping.has_cp_helix():
-            with nvtx_range("startup.autotuner_warmup", color="cyan"):
+            with startup_timing("startup.autotuner_warmup", color="cyan"):
                 self._run_autotuner_warmup(resource_manager)
             log_mem_snapshot("warmup/after_autotuner")
             # Pre-JIT Mamba SSD multi-seq + HAS_INITSTATES=True Triton kernels
@@ -1346,14 +1347,16 @@ class PyTorchModelEngine(ModelEngine):
         # launch argument and is baked into every later replay.
         with _moe_a2a_steady_state_budget_for_capture():
             with self.cuda_graph_runner.allow_capture():
-                with nvtx_range("startup.cuda_graph_warmup", color="yellow"):
+                with startup_timing("startup.cuda_graph_warmup",
+                                    color="yellow"):
                     self.cuda_graph_runner.is_warmup_only = True
                     try:
                         self._run_cuda_graph_warmup(resource_manager)
                     finally:
                         self.cuda_graph_runner.is_warmup_only = False
                 self.cuda_graph_runner.padding_dummy_requests = {}
-                with nvtx_range("startup.cuda_graph_capture", color="green"):
+                with startup_timing("startup.cuda_graph_capture",
+                                    color="green"):
                     self._run_cuda_graph_warmup(resource_manager)
         log_mem_snapshot("warmup/after_cuda_graph_capture")
         # Pre-compile DeepGEMM paged_mqa_logits_metadata for every 32-aligned
@@ -1374,7 +1377,7 @@ class PyTorchModelEngine(ModelEngine):
             # fragmentation at runtime.
             warmup_requests_configs = self._get_max_shape_warmup_requests(
                 resource_manager)
-            with nvtx_range("startup.max_shape_warmup", color="blue"):
+            with startup_timing("startup.max_shape_warmup", color="blue"):
                 self._general_warmup(resource_manager, warmup_requests_configs)
             log_mem_snapshot("warmup/after_memory_pool_prepop")
 
@@ -2096,15 +2099,15 @@ class PyTorchModelEngine(ModelEngine):
             return
 
         with runner.allow_capture():
-            with nvtx_range("startup.encoder_cuda_graph_warmup",
-                            color="yellow"):
+            with startup_timing("startup.encoder_cuda_graph_warmup",
+                                color="yellow"):
                 runner.is_warmup_only = True
                 try:
                     capture()
                 finally:
                     runner.is_warmup_only = False
-            with nvtx_range("startup.encoder_cuda_graph_capture",
-                            color="green"):
+            with startup_timing("startup.encoder_cuda_graph_capture",
+                                color="green"):
                 capture()
 
     def _capture_encoder_cuda_graphs_enc_dec(
@@ -2293,7 +2296,7 @@ class PyTorchModelEngine(ModelEngine):
                                 f"Run generation-only CUDA graph {operation} ({label}) "
                                 f"for batch size={bs}, draft_len={draft_len}, "
                                 f"max_seq_len={max_seq_len}")
-                            with nvtx_range(
+                            with startup_timing(
                                     f"startup.generation_cuda_graph.{operation}.bs{bs}_dl{draft_len}_sl{max_seq_len}",
                                     color="green"):
                                 self.enable_spec_decode = draft_len > 0 or self.is_draft_model or (
@@ -2496,7 +2499,7 @@ class PyTorchModelEngine(ModelEngine):
                     logger.info(
                         f"Run piecewise CUDA graph warmup for num tokens={num_tokens}"
                     )
-                    with nvtx_range(
+                    with startup_timing(
                             f"startup.piecewise_cuda_graph.nt{num_tokens}",
                             color="orange"):
                         # Run a few times to ensure capture
@@ -2528,7 +2531,7 @@ class PyTorchModelEngine(ModelEngine):
                 logger.info(
                     f"Run piecewise CUDA graph warmup for num tokens={num_tokens} with most requests"
                 )
-                with nvtx_range(
+                with startup_timing(
                         f"startup.piecewise_most_requests.nt{num_tokens}",
                         color="orange"):
                     self.forward(batch,
@@ -6842,12 +6845,12 @@ class PyTorchModelEngine(ModelEngine):
             ]))
         # Currently graph has not been captured, disable cuda graph for this warmup.
         with self.no_encoder_cuda_graph():
-            with nvtx_range("startup.encoder_general_warmup", color="blue"):
+            with startup_timing("startup.encoder_general_warmup", color="blue"):
                 self._general_warmup_encoder(warmup_configs)
                 gc.collect()
                 torch.cuda.empty_cache()
 
-        with nvtx_range("startup.encoder_autotuner_warmup", color="cyan"):
+        with startup_timing("startup.encoder_autotuner_warmup", color="cyan"):
             self._run_autotuner_warmup_encoder()
         # Warm up every encoder graph shape before capturing any graph. Some
         # attention kernels switch implementations at smaller shapes and need
@@ -6859,7 +6862,7 @@ class PyTorchModelEngine(ModelEngine):
 
         # Pre-populate the memory pool with max-shape allocations to reduce
         # fragmentation at runtime.
-        with nvtx_range("startup.encoder_max_shape_warmup", color="blue"):
+        with startup_timing("startup.encoder_max_shape_warmup", color="blue"):
             self._general_warmup_encoder([max_shape])
 
     def _general_warmup_encoder(self, configs: List[Tuple[int, int,

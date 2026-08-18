@@ -47,6 +47,7 @@ from .guided_decoder import CapturableGuidedDecoder, GuidedDecoder
 from .model_engine import PyTorchModelEngine
 from .model_loader import ModelLoader, _construct_checkpoint_loader
 from .py_executor import PyExecutor
+from .startup_timing import log_startup_cpu_timings, reset_startup_cpu_timings
 
 _MLA_KV_CACHE_REUSE_SUPPORTED_SM_VERSIONS = (90, 100, 103, 120, 121)
 _MLA_CHUNKED_PREFILL_SUPPORTED_SM_VERSIONS = (90, 100, 103, 120)
@@ -297,6 +298,8 @@ def create_encoder_executor(
     """
     from .encoder_executor import EncoderExecutor
 
+    reset_startup_cpu_timings()
+
     llm_args, checkpoint_loader = _load_config_and_create_checkpoint_loader(
         llm_args, checkpoint_dir)
 
@@ -312,10 +315,12 @@ def create_encoder_executor(
         checkpoint_loader=checkpoint_loader,
     )
 
-    return EncoderExecutor(
+    encoder_executor = EncoderExecutor(
         model_engine=model_engine,
         dist=dist,
     )
+    log_startup_cpu_timings()
+    return encoder_executor
 
 
 def log_memory_usage(stage: str):
@@ -360,6 +365,8 @@ def create_py_executor(
     Returns:
         A fully initialized PyExecutor instance.
     """
+
+    reset_startup_cpu_timings()
 
     skip_est = os.environ.get("TRTLLM_SKIP_KV_CACHE_ESTIMATION", '0') == '1'
     llm_args, checkpoint_loader = _load_config_and_create_checkpoint_loader(
@@ -1102,5 +1109,6 @@ def create_py_executor(
         logger.info(f"LLM Args:\n{llm_args}")
 
     py_executor.start_worker()
+    log_startup_cpu_timings()
 
     return py_executor
