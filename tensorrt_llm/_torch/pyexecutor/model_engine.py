@@ -1255,7 +1255,8 @@ class PyTorchModelEngine(ModelEngine):
         # warmup is skipped: only the advanced-sampling CUDA graph capture pass
         # exercises the non-greedy sampler, so with cuda_graph_config=None
         # flashinfer's sampling kernels would be JIT-built mid-serving.
-        warmup_sampling_module()
+        with nvtx_range("startup.sampling_warmup", color="purple"):
+            warmup_sampling_module()
 
         kv_cache_manager = resource_manager.get_resource_manager(
             self.kv_cache_manager_key)
@@ -1294,7 +1295,9 @@ class PyTorchModelEngine(ModelEngine):
         self._prewarm_cute_dsl_indexer_q()
         log_mem_snapshot("warmup/after_cute_dsl_indexer_q")
         if not is_enc_dec:
-            self._run_attention_warmup(resource_manager, can_run_general_warmup)
+            with nvtx_range("startup.attention_warmup", color="yellow"):
+                self._run_attention_warmup(resource_manager,
+                                           can_run_general_warmup)
 
         if can_run_general_warmup:
             # Specialize torch.compile graphs across the key input shapes before CUDA graph capture.
@@ -1320,20 +1323,20 @@ class PyTorchModelEngine(ModelEngine):
         if not is_enc_dec and not self.mapping.has_cp_helix():
             with nvtx_range("startup.autotuner_warmup", color="cyan"):
                 self._run_autotuner_warmup(resource_manager)
-                log_mem_snapshot("warmup/after_autotuner")
-                # Pre-JIT Mamba SSD multi-seq + HAS_INITSTATES=True Triton kernels
-                # for Mamba hybrid models. Runs regardless of enable_autotuner,
-                # since MambaHybridCacheManager skips _general_warmup and the
-                # default autotuner shape is single-seq / no-initstates. Safe
-                # no-op for non-Mamba models.
-                self._run_mamba_hybrid_warmup(resource_manager)
-                log_mem_snapshot("warmup/after_mamba_hybrid")
-                # Release the autotuner's exploration-mode intermediates. The
-                # exploration leftovers are pure waste that hide tens of GiB from
-                # non-torch allocators (cuBLAS handle workspace, UCX/NIXL,
-                # NVSHMEM).
-                gc.collect()
-                torch.cuda.empty_cache()
+            log_mem_snapshot("warmup/after_autotuner")
+            # Pre-JIT Mamba SSD multi-seq + HAS_INITSTATES=True Triton kernels
+            # for Mamba hybrid models. Runs regardless of enable_autotuner,
+            # since MambaHybridCacheManager skips _general_warmup and the
+            # default autotuner shape is single-seq / no-initstates. Safe
+            # no-op for non-Mamba models.
+            self._run_mamba_hybrid_warmup(resource_manager)
+            log_mem_snapshot("warmup/after_mamba_hybrid")
+            # Release the autotuner's exploration-mode intermediates. The
+            # exploration leftovers are pure waste that hide tens of GiB from
+            # non-torch allocators (cuBLAS handle workspace, UCX/NIXL,
+            # NVSHMEM).
+            gc.collect()
+            torch.cuda.empty_cache()
         # Warm up every graph shape before capturing any graph. Attention
         # kernels can switch implementations at smaller batch sizes and require
         # a larger workspace, so the first pass grows the workspace to its
@@ -1349,7 +1352,8 @@ class PyTorchModelEngine(ModelEngine):
                         self._run_cuda_graph_warmup(resource_manager)
                     finally:
                         self.cuda_graph_runner.is_warmup_only = False
-                    self.cuda_graph_runner.padding_dummy_requests = {}
+                self.cuda_graph_runner.padding_dummy_requests = {}
+                with nvtx_range("startup.cuda_graph_capture", color="green"):
                     self._run_cuda_graph_warmup(resource_manager)
         log_mem_snapshot("warmup/after_cuda_graph_capture")
         # Pre-compile DeepGEMM paged_mqa_logits_metadata for every 32-aligned
@@ -2092,12 +2096,16 @@ class PyTorchModelEngine(ModelEngine):
             return
 
         with runner.allow_capture():
-            runner.is_warmup_only = True
-            try:
+            with nvtx_range("startup.encoder_cuda_graph_warmup",
+                            color="yellow"):
+                runner.is_warmup_only = True
+                try:
+                    capture()
+                finally:
+                    runner.is_warmup_only = False
+            with nvtx_range("startup.encoder_cuda_graph_capture",
+                            color="green"):
                 capture()
-            finally:
-                runner.is_warmup_only = False
-            capture()
 
     def _capture_encoder_cuda_graphs_enc_dec(
             self, resource_manager: ResourceManager) -> None:
@@ -2286,7 +2294,7 @@ class PyTorchModelEngine(ModelEngine):
                                 f"for batch size={bs}, draft_len={draft_len}, "
                                 f"max_seq_len={max_seq_len}")
                             with nvtx_range(
-                                    f"startup.generation_cuda_graph.bs{bs}_dl{draft_len}_sl{max_seq_len}",
+                                    f"startup.generation_cuda_graph.{operation}.bs{bs}_dl{draft_len}_sl{max_seq_len}",
                                     color="green"):
                                 self.enable_spec_decode = draft_len > 0 or self.is_draft_model or (
                                     self.spec_config is not None and self.
@@ -6834,11 +6842,13 @@ class PyTorchModelEngine(ModelEngine):
             ]))
         # Currently graph has not been captured, disable cuda graph for this warmup.
         with self.no_encoder_cuda_graph():
-            self._general_warmup_encoder(warmup_configs)
-            gc.collect()
-            torch.cuda.empty_cache()
+            with nvtx_range("startup.encoder_general_warmup", color="blue"):
+                self._general_warmup_encoder(warmup_configs)
+                gc.collect()
+                torch.cuda.empty_cache()
 
-        self._run_autotuner_warmup_encoder()
+        with nvtx_range("startup.encoder_autotuner_warmup", color="cyan"):
+            self._run_autotuner_warmup_encoder()
         # Warm up every encoder graph shape before capturing any graph. Some
         # attention kernels switch implementations at smaller shapes and need
         # a larger workspace, so the first pass grows the workspace to its
@@ -6849,7 +6859,8 @@ class PyTorchModelEngine(ModelEngine):
 
         # Pre-populate the memory pool with max-shape allocations to reduce
         # fragmentation at runtime.
-        self._general_warmup_encoder([max_shape])
+        with nvtx_range("startup.encoder_max_shape_warmup", color="blue"):
+            self._general_warmup_encoder([max_shape])
 
     def _general_warmup_encoder(self, configs: List[Tuple[int, int,
                                                           int]]) -> None:
