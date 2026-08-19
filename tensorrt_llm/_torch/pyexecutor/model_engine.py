@@ -2296,21 +2296,18 @@ class PyTorchModelEngine(ModelEngine):
                                 f"Run generation-only CUDA graph {operation} ({label}) "
                                 f"for batch size={bs}, draft_len={draft_len}, "
                                 f"max_seq_len={max_seq_len}")
-                            with startup_timing(
-                                    f"startup.generation_cuda_graph.{operation}.bs{bs}_dl{draft_len}_sl{max_seq_len}",
-                                    color="green"):
-                                self.enable_spec_decode = draft_len > 0 or self.is_draft_model or (
-                                    self.spec_config is not None and self.
-                                    spec_config.spec_dec_mode.use_one_engine())
-                                self._update_draft_inference_state_for_warmup(
-                                    batch, draft_len > 0, resource_manager)
-                                self.runtime_draft_len = draft_len
-                                if self._is_encoder_decoder_model():
-                                    prepare_cross_batch(batch, resource_manager)
-                                self.forward(batch,
-                                             new_tensors_device=None,
-                                             resource_manager=resource_manager)
-                                torch.cuda.synchronize()
+                            self.enable_spec_decode = draft_len > 0 or self.is_draft_model or (
+                                self.spec_config is not None and
+                                self.spec_config.spec_dec_mode.use_one_engine())
+                            self._update_draft_inference_state_for_warmup(
+                                batch, draft_len > 0, resource_manager)
+                            self.runtime_draft_len = draft_len
+                            if self._is_encoder_decoder_model():
+                                prepare_cross_batch(batch, resource_manager)
+                            self.forward(batch,
+                                         new_tensors_device=None,
+                                         resource_manager=resource_manager)
+                            torch.cuda.synchronize()
             finally:
                 if force_non_greedy and spec_metadata is not None:
                     spec_metadata._force_non_greedy_for_capture = False
@@ -2499,21 +2496,22 @@ class PyTorchModelEngine(ModelEngine):
                     logger.info(
                         f"Run piecewise CUDA graph warmup for num tokens={num_tokens}"
                     )
-                    with startup_timing(
-                            f"startup.piecewise_cuda_graph.nt{num_tokens}",
-                            color="orange"):
-                        # Run a few times to ensure capture
+                    with startup_timing("startup.piecewise_cuda_graph_warmup",
+                                        color="yellow"):
+                        # Piecewise runners warm up three times before capture.
                         for _ in range(3):
                             self.forward(batch,
                                          new_tensors_device=None,
                                          resource_manager=resource_manager)
 
+                    with startup_timing("startup.piecewise_cuda_graph_capture",
+                                        color="green"):
                         self.forward(batch,
                                      new_tensors_device=None,
                                      resource_manager=resource_manager)
                         torch.cuda.synchronize()
-                        gc.collect()
-                        torch.cuda.empty_cache()
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
         # When using piecewise cuda graph, the logits may suffer severe memory fragmentation problem.
         # As the number of requests grows, the blocks allocated by torch cannot be reused.
@@ -2531,9 +2529,8 @@ class PyTorchModelEngine(ModelEngine):
                 logger.info(
                     f"Run piecewise CUDA graph warmup for num tokens={num_tokens} with most requests"
                 )
-                with startup_timing(
-                        f"startup.piecewise_most_requests.nt{num_tokens}",
-                        color="orange"):
+                with startup_timing("startup.piecewise_cuda_graph_warmup",
+                                    color="yellow"):
                     self.forward(batch,
                                  new_tensors_device=None,
                                  resource_manager=resource_manager)
