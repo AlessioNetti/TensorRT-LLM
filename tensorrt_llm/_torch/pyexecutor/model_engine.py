@@ -1347,17 +1347,13 @@ class PyTorchModelEngine(ModelEngine):
         # launch argument and is baked into every later replay.
         with _moe_a2a_steady_state_budget_for_capture():
             with self.cuda_graph_runner.allow_capture():
-                with startup_timing("startup.cuda_graph_warmup",
-                                    color="yellow"):
-                    self.cuda_graph_runner.is_warmup_only = True
-                    try:
-                        self._run_cuda_graph_warmup(resource_manager)
-                    finally:
-                        self.cuda_graph_runner.is_warmup_only = False
-                self.cuda_graph_runner.padding_dummy_requests = {}
-                with startup_timing("startup.cuda_graph_capture",
-                                    color="green"):
+                self.cuda_graph_runner.is_warmup_only = True
+                try:
                     self._run_cuda_graph_warmup(resource_manager)
+                finally:
+                    self.cuda_graph_runner.is_warmup_only = False
+                self.cuda_graph_runner.padding_dummy_requests = {}
+                self._run_cuda_graph_warmup(resource_manager)
         log_mem_snapshot("warmup/after_cuda_graph_capture")
         # Pre-compile DeepGEMM paged_mqa_logits_metadata for every 32-aligned
         # batch bucket the runtime can produce (max_batch_size scaled by the
@@ -2069,8 +2065,12 @@ class PyTorchModelEngine(ModelEngine):
                 or self._torch_compile_piecewise_cuda_graph):
             return
 
-        self._capture_generation_cuda_graphs(resource_manager)
-        self._capture_mixed_encoder_decoder_cuda_graphs(resource_manager)
+        is_warmup_only = self.cuda_graph_runner.is_warmup_only
+        operation = "warmup" if is_warmup_only else "capture"
+        color = "yellow" if is_warmup_only else "green"
+        with startup_timing(f"startup.cuda_graph_{operation}", color=color):
+            self._capture_generation_cuda_graphs(resource_manager)
+            self._capture_mixed_encoder_decoder_cuda_graphs(resource_manager)
         # Piecewise graphs have separate capture machinery and do not use the
         # whole-model attention workspace. Capture them only on the second pass.
         if not self.cuda_graph_runner.is_warmup_only:

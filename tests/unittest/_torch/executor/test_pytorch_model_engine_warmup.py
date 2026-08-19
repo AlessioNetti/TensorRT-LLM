@@ -178,6 +178,59 @@ def _capture_tllm_logs():
 class TestWarmupCleanup(unittest.TestCase):
     """Lock in warmup-cleanup behavior introduced by PR #14609 (Plan B)."""
 
+    def test_cuda_graph_timings_exclude_piecewise_graphs(self):
+        model_engine = object.__new__(PyTorchModelEngine)
+        model_engine.cuda_graph_runner = SimpleNamespace(
+            enabled=True,
+            is_warmup_only=True,
+        )
+        model_engine._torch_compile_piecewise_cuda_graph = True
+        resource_manager = object()
+        events = []
+
+        @contextlib.contextmanager
+        def record_timing(key, **_):
+            events.append(f"enter:{key}")
+            yield
+            events.append(f"exit:{key}")
+
+        with (
+            patch(
+                "tensorrt_llm._torch.pyexecutor.model_engine.startup_timing",
+                side_effect=record_timing,
+            ),
+            patch.object(
+                model_engine,
+                "_capture_generation_cuda_graphs",
+                side_effect=lambda _: events.append("generation"),
+            ),
+            patch.object(
+                model_engine,
+                "_capture_mixed_encoder_decoder_cuda_graphs",
+                side_effect=lambda _: events.append("mixed"),
+            ),
+            patch.object(
+                model_engine,
+                "_capture_piecewise_cuda_graphs",
+                side_effect=lambda _: events.append("piecewise"),
+            ),
+        ):
+            model_engine._run_cuda_graph_warmup(resource_manager)
+            model_engine.cuda_graph_runner.is_warmup_only = False
+            model_engine._run_cuda_graph_warmup(resource_manager)
+
+        assert events == [
+            "enter:startup.cuda_graph_warmup",
+            "generation",
+            "mixed",
+            "exit:startup.cuda_graph_warmup",
+            "enter:startup.cuda_graph_capture",
+            "generation",
+            "mixed",
+            "exit:startup.cuda_graph_capture",
+            "piecewise",
+        ]
+
     def test_encoder_decoder_encoder_warmup_is_deferred_and_uses_two_passes(self):
         model_engine = object.__new__(PyTorchModelEngine)
         model_engine.cuda_graph_runner = SimpleNamespace(
