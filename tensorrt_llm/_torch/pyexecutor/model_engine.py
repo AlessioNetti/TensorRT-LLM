@@ -2729,21 +2729,18 @@ class PyTorchModelEngine(ModelEngine):
                                 f"Run generation-only CUDA graph {operation} ({label}) "
                                 f"for batch size={bs}, draft_len={draft_len}, "
                                 f"max_seq_len={max_seq_len}")
-                            with startup_timing(
-                                    f"startup.generation_cuda_graph.{operation}.bs{bs}_dl{draft_len}_sl{max_seq_len}",
-                                    color="green"):
-                                self.enable_spec_decode = draft_len > 0 or self.is_draft_model or (
-                                    self.spec_config is not None and self.
-                                    spec_config.spec_dec_mode.use_one_engine())
-                                self._update_draft_inference_state_for_warmup(
-                                    batch, draft_len > 0, resource_manager)
-                                self.runtime_draft_len = draft_len
-                                if self._is_encoder_decoder_model():
-                                    prepare_cross_batch(batch, resource_manager)
-                                self.forward(batch,
-                                             new_tensors_device=None,
-                                             resource_manager=resource_manager)
-                                torch.cuda.synchronize()
+                            self.enable_spec_decode = draft_len > 0 or self.is_draft_model or (
+                                self.spec_config is not None and
+                                self.spec_config.spec_dec_mode.use_one_engine())
+                            self._update_draft_inference_state_for_warmup(
+                                batch, draft_len > 0, resource_manager)
+                            self.runtime_draft_len = draft_len
+                            if self._is_encoder_decoder_model():
+                                prepare_cross_batch(batch, resource_manager)
+                            self.forward(batch,
+                                         new_tensors_device=None,
+                                         resource_manager=resource_manager)
+                            torch.cuda.synchronize()
             finally:
                 self._force_lora_graph_for_capture = None
 
@@ -2954,22 +2951,32 @@ class PyTorchModelEngine(ModelEngine):
                     logger.info(
                         f"Run prefill CUDA graph capture for num tokens={num_tokens}"
                     )
-                    with startup_timing(
-                            f"startup.piecewise_cuda_graph.nt{num_tokens}",
-                            color="orange"):
-                        if self.breakable_cuda_graph_runner is not None:
+                    if self.breakable_cuda_graph_runner is not None:
+                        with startup_timing(
+                                "startup.piecewise_cuda_graph_capture",
+                                color="green"):
                             self.breakable_cuda_graph_runner.capture(
                                 num_tokens, lambda: self.forward(
                                     batch,
                                     new_tensors_device=None,
                                     resource_manager=resource_manager))
-                        else:
-                            # Run a few times to ensure torch.compile capture.
-                            for _ in range(4):
+                    else:
+                        with startup_timing(
+                                "startup.piecewise_cuda_graph_warmup",
+                                color="yellow"):
+                            # The first three forwards warm up torch.compile.
+                            for _ in range(3):
                                 self.forward(
                                     batch,
                                     new_tensors_device=None,
                                     resource_manager=resource_manager)
+                        with startup_timing(
+                                "startup.piecewise_cuda_graph_capture",
+                                color="green"):
+                            self.forward(
+                                batch,
+                                new_tensors_device=None,
+                                resource_manager=resource_manager)
 
         # The logits allocations grow with the number of requests and are not
         # part of the captured model body. Warm up the largest request count so
@@ -2987,9 +2994,8 @@ class PyTorchModelEngine(ModelEngine):
                 logger.info(
                     f"Run prefill CUDA graph warmup for num tokens={num_tokens} with most requests"
                 )
-                with startup_timing(
-                        f"startup.piecewise_most_requests.nt{num_tokens}",
-                        color="orange"):
+                with startup_timing("startup.piecewise_cuda_graph_warmup",
+                                    color="yellow"):
                     if self.breakable_cuda_graph_runner is not None:
                         with self.no_cuda_graph():
                             self.breakable_cuda_graph_runner.warmup(
