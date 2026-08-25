@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import os
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from threading import Lock
 from typing import Iterator
 
@@ -13,6 +16,7 @@ STARTUP_CPU_TIMINGS: dict[str, float] = {}
 """Cumulative wall-clock startup timings in seconds, keyed by NVTX range."""
 
 _STARTUP_CPU_TIMINGS_LOCK = Lock()
+_STARTUP_CPU_TIMINGS_PATH = Path("/tmp/trt-llm-timings.json")
 
 
 @contextmanager
@@ -42,12 +46,21 @@ def reset_startup_cpu_timings() -> None:
     """Clear timings before starting a new executor initialization."""
     with _STARTUP_CPU_TIMINGS_LOCK:
         STARTUP_CPU_TIMINGS.clear()
+    _STARTUP_CPU_TIMINGS_PATH.unlink(missing_ok=True)
 
 
 def log_startup_cpu_timings() -> None:
     """Log all recorded startup CPU timings in milliseconds."""
     with _STARTUP_CPU_TIMINGS_LOCK:
         timings = STARTUP_CPU_TIMINGS.copy()
+
+    temporary_path = _STARTUP_CPU_TIMINGS_PATH.with_name(
+        f".{_STARTUP_CPU_TIMINGS_PATH.name}.{os.getpid()}.tmp"
+    )
+    with temporary_path.open("w") as timings_file:
+        json.dump(timings, timings_file, indent=2, sort_keys=True)
+        timings_file.write("\n")
+    temporary_path.replace(_STARTUP_CPU_TIMINGS_PATH)
 
     if not timings:
         return
