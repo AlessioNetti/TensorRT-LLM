@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
@@ -16,10 +18,15 @@ from tensorrt_llm._torch.pyexecutor.startup_timing import (
 
 
 @pytest.fixture(autouse=True)
-def clear_startup_timings() -> Iterator[None]:
-    reset_startup_cpu_timings()
-    yield
-    reset_startup_cpu_timings()
+def clear_startup_timings(tmp_path: Path) -> Iterator[Path]:
+    timings_path = tmp_path / "trt-llm-timings.json"
+    with patch(
+        "tensorrt_llm._torch.pyexecutor.startup_timing._STARTUP_CPU_TIMINGS_PATH",
+        timings_path,
+    ):
+        reset_startup_cpu_timings()
+        yield timings_path
+        reset_startup_cpu_timings()
 
 
 def test_startup_timing_wraps_nvtx_and_accumulates_repeated_keys() -> None:
@@ -48,7 +55,9 @@ def test_startup_timing_wraps_nvtx_and_accumulates_repeated_keys() -> None:
     )
 
 
-def test_log_startup_cpu_timings_reports_milliseconds() -> None:
+def test_log_startup_cpu_timings_reports_milliseconds(
+    clear_startup_timings: Path,
+) -> None:
     STARTUP_CPU_TIMINGS.update({"startup.second": 0.002, "startup.first": 1.0})
 
     with patch("tensorrt_llm._torch.pyexecutor.startup_timing.logger.info") as log_info:
@@ -57,3 +66,19 @@ def test_log_startup_cpu_timings_reports_milliseconds() -> None:
     log_info.assert_called_once_with(
         "TRT-LLM startup CPU timings:\n  startup.first: 1000.00 ms\n  startup.second: 2.00 ms"
     )
+    assert json.loads(clear_startup_timings.read_text()) == {
+        "startup.first": 1.0,
+        "startup.second": 0.002,
+    }
+
+
+def test_reset_startup_cpu_timings_removes_json_file(
+    clear_startup_timings: Path,
+) -> None:
+    clear_startup_timings.write_text("{}")
+    STARTUP_CPU_TIMINGS["startup.test"] = 1.0
+
+    reset_startup_cpu_timings()
+
+    assert STARTUP_CPU_TIMINGS == {}
+    assert not clear_startup_timings.exists()
