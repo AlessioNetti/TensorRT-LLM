@@ -506,25 +506,27 @@ class PyTorchModelEngine(ModelEngine):
         self.moe_load_balancer: Optional[MoeLoadBalancer] = None
         self.model_loader: Optional[ModelLoader] = None
         if model is None:
-            lora_config: Optional[
-                LoraConfig] = None if is_draft_model else llm_args.lora_config
-            # Keep the model_loader to support reloading the model weights later
-            self.model_loader = ModelLoader(
-                llm_args=llm_args,
-                mapping=self.mapping,
-                spec_config=self.spec_config,
-                sparse_attention_config=self.sparse_attention_config,
-                max_num_tokens=self.max_num_tokens,
-                max_seq_len=self.max_seq_len,
-                lora_config=lora_config,
-                model_weights_memory_tag=model_weights_memory_tag,
-                model_weights_restore_mode=model_weights_restore_mode,
-            )
-            # Open checkpoint and load the LLM module object.
-            self.model, moe_load_balancer = self.model_loader.load(
-                checkpoint_dir=model_path, checkpoint_loader=checkpoint_loader)
-            if isinstance(moe_load_balancer, MoeLoadBalancer):
-                self.moe_load_balancer = moe_load_balancer
+            with startup_timing("startup.weight_loading", color="green"):
+                lora_config: Optional[
+                    LoraConfig] = None if is_draft_model else llm_args.lora_config
+                # Keep the model_loader to support reloading the model weights later
+                self.model_loader = ModelLoader(
+                    llm_args=llm_args,
+                    mapping=self.mapping,
+                    spec_config=self.spec_config,
+                    sparse_attention_config=self.sparse_attention_config,
+                    max_num_tokens=self.max_num_tokens,
+                    max_seq_len=self.max_seq_len,
+                    lora_config=lora_config,
+                    model_weights_memory_tag=model_weights_memory_tag,
+                    model_weights_restore_mode=model_weights_restore_mode,
+                )
+                # Open checkpoint and load the LLM module object.
+                self.model, moe_load_balancer = self.model_loader.load(
+                    checkpoint_dir=model_path,
+                    checkpoint_loader=checkpoint_loader)
+                if isinstance(moe_load_balancer, MoeLoadBalancer):
+                    self.moe_load_balancer = moe_load_balancer
         else:
             self.model = model
         self._validate_breakable_cuda_graph_compatibility()
@@ -2966,17 +2968,15 @@ class PyTorchModelEngine(ModelEngine):
                                 color="yellow"):
                             # The first three forwards warm up torch.compile.
                             for _ in range(3):
-                                self.forward(
-                                    batch,
-                                    new_tensors_device=None,
-                                    resource_manager=resource_manager)
+                                self.forward(batch,
+                                             new_tensors_device=None,
+                                             resource_manager=resource_manager)
                         with startup_timing(
                                 "startup.piecewise_cuda_graph_capture",
                                 color="green"):
-                            self.forward(
-                                batch,
-                                new_tensors_device=None,
-                                resource_manager=resource_manager)
+                            self.forward(batch,
+                                         new_tensors_device=None,
+                                         resource_manager=resource_manager)
 
         # The logits allocations grow with the number of requests and are not
         # part of the captured model body. Warm up the largest request count so
@@ -2999,10 +2999,10 @@ class PyTorchModelEngine(ModelEngine):
                     if self.breakable_cuda_graph_runner is not None:
                         with self.no_cuda_graph():
                             self.breakable_cuda_graph_runner.warmup(
-                                lambda: self.forward(
-                                    batch,
-                                    new_tensors_device=None,
-                                    resource_manager=resource_manager),
+                                lambda: self.forward(batch,
+                                                     new_tensors_device=None,
+                                                     resource_manager=
+                                                     resource_manager),
                                 steps=1)
                     else:
                         self.forward(batch,
