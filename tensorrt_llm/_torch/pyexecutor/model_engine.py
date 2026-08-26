@@ -468,24 +468,26 @@ class PyTorchModelEngine(ModelEngine):
                 and llm_args.multimodal_config.encoder_cache_max_bytes > 0),
         )
         if model is None:
-            lora_config: Optional[
-                LoraConfig] = None if is_draft_model else llm_args.lora_config
-            # Keep the model_loader to support reloading the model weights later
-            self.model_loader = ModelLoader(
-                llm_args=llm_args,
-                mapping=self.mapping,
-                spec_config=self.spec_config,
-                sparse_attention_config=self.sparse_attention_config,
-                max_num_tokens=self.max_num_tokens,
-                max_seq_len=self.max_seq_len,
-                lora_config=lora_config,
-                model_weights_memory_tag=model_weights_memory_tag,
-                model_weights_restore_mode=model_weights_restore_mode,
-            )
-            self.model, moe_load_balancer = self.model_loader.load(
-                checkpoint_dir=model_path, checkpoint_loader=checkpoint_loader)
-            if isinstance(moe_load_balancer, MoeLoadBalancer):
-                setattr(self, "moe_load_balancer", moe_load_balancer)
+            with startup_timing("startup.weight_loading", color="green"):
+                lora_config: Optional[
+                    LoraConfig] = None if is_draft_model else llm_args.lora_config
+                # Keep the model_loader to support reloading the model weights later
+                self.model_loader = ModelLoader(
+                    llm_args=llm_args,
+                    mapping=self.mapping,
+                    spec_config=self.spec_config,
+                    sparse_attention_config=self.sparse_attention_config,
+                    max_num_tokens=self.max_num_tokens,
+                    max_seq_len=self.max_seq_len,
+                    lora_config=lora_config,
+                    model_weights_memory_tag=model_weights_memory_tag,
+                    model_weights_restore_mode=model_weights_restore_mode,
+                )
+                self.model, moe_load_balancer = self.model_loader.load(
+                    checkpoint_dir=model_path,
+                    checkpoint_loader=checkpoint_loader)
+                if isinstance(moe_load_balancer, MoeLoadBalancer):
+                    setattr(self, "moe_load_balancer", moe_load_balancer)
         else:
             self.model = model
         pretrained_config = self.model.model_config.pretrained_config
