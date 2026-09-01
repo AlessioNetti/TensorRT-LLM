@@ -30,6 +30,10 @@ from tensorrt_llm._torch.virtual_memory import (materialize_with_tag,
 from tensorrt_llm.executor.ray.utils import control_action_decorator
 
 from ... import TorchLlmArgs
+from ..._cache import (acquire_cache_initialization_locks,
+                       configure_unified_caches, mark_cache_lock_managed,
+                       release_cache_initialization_locks,
+                       unified_cache_enabled, unmark_cache_lock_managed)
 from ...bindings import executor as tllm
 from ...llmapi.llm_args import BaseLlmArgs, ExecutorMemoryType
 from ...llmapi.tokenizer import TokenizerBase
@@ -74,9 +78,13 @@ class RayWorkerWrapper:
         self.gpu = int(ray.get_gpu_ids()[0])
         self.local_gpu = self.physical_to_local_id(self.gpu)
 
-        # Per-worker DeepGemm JIT cache to avoid rename race across co-located workers
-        os.environ["DG_JIT_CACHE_DIR"] = os.path.join(
-            tempfile.gettempdir(), f"deep_gemm_rank{rank}_gpu{self.gpu}")
+        if unified_cache_enabled():
+            configure_unified_caches(rank, rerank=True)
+        else:
+            # Per-worker DeepGemm JIT cache to avoid rename races across
+            # co-located workers.
+            os.environ["DG_JIT_CACHE_DIR"] = os.path.join(
+                tempfile.gettempdir(), f"deep_gemm_rank{rank}_gpu{self.gpu}")
 
         torch.cuda.set_device(self.local_gpu)
 
@@ -264,10 +272,31 @@ class RayGPUWorker(RpcWorkerMixin, BaseWorker):
         self.start_rpc_server()
 
     def setup_engine(self):
-        if torch.distributed.is_initialized(
-        ) and torch.distributed.get_world_size() > 1:
-            torch.distributed.barrier()
-        super().setup_engine()
+        cache_locks_enabled = unified_cache_enabled()
+        cache_lock_error = [None]
+        if cache_locks_enabled and self.global_rank == 0:
+            try:
+                acquire_cache_initialization_locks()
+            except (OSError, TimeoutError, ValueError) as error:
+                cache_lock_error[0] = str(error)
+        if cache_locks_enabled:
+            torch.distributed.broadcast_object_list(cache_lock_error, src=0)
+            if cache_lock_error[0] is not None:
+                raise RuntimeError(cache_lock_error[0])
+            mark_cache_lock_managed()
+
+        try:
+            if torch.distributed.is_initialized(
+            ) and torch.distributed.get_world_size() > 1:
+                torch.distributed.barrier()
+            super().setup_engine()
+            if cache_locks_enabled:
+                torch.distributed.barrier()
+        finally:
+            if cache_locks_enabled and self.global_rank == 0:
+                release_cache_initialization_locks()
+            if cache_locks_enabled:
+                unmark_cache_lock_managed()
 
     def enqueue_request(self,
                         request: GenerationRequest,

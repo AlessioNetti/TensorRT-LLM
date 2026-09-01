@@ -15,12 +15,12 @@
 
 import fcntl
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from tensorrt_llm import _cache
 from tensorrt_llm.bindings.BuildInfo import ENABLE_MULTI_DEVICE
 from tensorrt_llm.llmapi import mpi_session
 
@@ -38,9 +38,8 @@ def _worker_flashinfer_env() -> tuple[str | None, str | None]:
 def _run_worker_bootstrap(monkeypatch: pytest.MonkeyPatch, workspace_root: Path) -> None:
     from mpi4py.futures import server
 
-    monkeypatch.setattr(sys, "argv", ["-c", str(workspace_root)])
     monkeypatch.setattr(server, "main", lambda: None)
-    exec(mpi_session._FLASHINFER_WORKER_BOOTSTRAP, {})
+    _cache._run_legacy_flashinfer_bootstrap(str(workspace_root))
 
 
 def test_worker_bootstrap_reuses_rank_workspace_and_releases_lock(
@@ -157,8 +156,8 @@ def test_worker_bootstrap_warns_when_unlock_fails(
             4,
             {_FLASHINFER_ISOLATION_ENV: "1"},
             [
-                "-c",
-                mpi_session._FLASHINFER_WORKER_BOOTSTRAP,
+                _cache.cache_bootstrap_path(),
+                "flashinfer-isolate",
                 mpi_session._FLASHINFER_WORKSPACE_ROOT,
             ],
         ),
@@ -204,6 +203,29 @@ def test_mpi_pool_configures_worker_bootstrap(
     env = captured["env"]
     assert isinstance(env, dict)
     assert all(env[key] == value for key, value in env_overrides.items())
+
+
+def test_mpi_pool_bootstraps_ranked_unified_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(_cache.UNIFIED_CACHE_ROOT_ENV, str(tmp_path))
+    _cache.configure_unified_caches(rank=0)
+    captured: dict[str, object] = {}
+
+    class FakeMpiPoolExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(mpi_session, "MPIPoolExecutor", FakeMpiPoolExecutor)
+    session = SimpleNamespace(n_workers=4, _env_overrides={}, mpi_pool=None)
+
+    mpi_session.MpiPoolSession._start_mpi_pool(session)
+
+    assert captured["python_args"] == [_cache.cache_bootstrap_path(), "unified"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env[_cache.UNIFIED_CACHE_ROOT_ENV] == str(tmp_path.absolute())
+    assert all(name not in env for name in _cache.derived_cache_env_vars())
 
 
 def test_mpi_pool_shares_cubins_but_isolates_workspaces(

@@ -112,6 +112,9 @@ def _setup_vendored_triton_kernels():
 
 def _prepare_environment() -> None:
     """Phase 1: environment and library preparation, before the Torch import."""
+    from ._cache import configure_unified_caches
+
+    configure_unified_caches(rerank=True)
     _add_trt_llm_dll_directory()
     _preload_python_lib()
     _setup_vendored_triton_kernels()

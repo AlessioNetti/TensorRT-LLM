@@ -37,6 +37,7 @@ from tensorrt_llm._utils import nvtx_range_debug
 from tensorrt_llm.executor.ray.utils import unwrap_ray_errors
 from tensorrt_llm.logger import logger
 
+from ..._cache import CACHE_RANK_ENV
 from ...llmapi.utils import logger_debug
 from ..executor import GenerationExecutor
 from ..postproc_worker import PostprocWorkerConfig
@@ -174,9 +175,12 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
         for rank in range(self.world_size):
             pg = placement_groups[rank] if isinstance(
                 placement_groups, list) else placement_groups
+            worker_runtime_env = runtime_env.copy()
+            worker_runtime_env["env_vars"] = runtime_env["env_vars"].copy()
+            worker_runtime_env["env_vars"][CACHE_RANK_ENV] = str(rank)
             worker = RayWorkerWrapper.options(
                 num_gpus=num_gpus,
-                runtime_env=runtime_env,
+                runtime_env=worker_runtime_env,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=self.bundle_indices[rank],

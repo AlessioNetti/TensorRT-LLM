@@ -126,20 +126,29 @@ The following tips typically assist new LLM API users who are familiar with othe
 
   This limitation is applicable for multi-GPU inference only.
 
-### FlashInfer JIT workspace for dynamically spawned MPI workers
+### Unified compilation cache
 
-When the LLM API dynamically spawns multiple MPI workers, users affected by
-concurrent FlashInfer source-generation races can enable persistent, per-worker
-cache slots for FlashInfer JIT artifacts. Set
-`TRTLLM_FLASHINFER_WORKSPACE_PER_PROCESS=1` before creating the LLM instance.
-The workaround preserves compiled artifacts between launches, and downloaded
-cubins remain in FlashInfer's shared cache. It is disabled by default and can
-be removed once FlashInfer guards source generation before writing shared
-workspace files.
+Set `TRTLLM_CACHE_DIR` before starting the Python process to place TensorRT-LLM
+and its kernel dependencies' compilation caches beneath one persistent root.
+TensorRT-LLM creates a subdirectory for every cache implementation and worker rank
+and configures `TLLM_AUTOTUNER_CACHE_PATH`, `TORCHINDUCTOR_CACHE_DIR`,
+`TRITON_CACHE_DIR`, `TORCH_EXTENSIONS_DIR`, `FLASHINFER_WORKSPACE_BASE`,
+`CUTE_DSL_CACHE_DIR`, `DG_JIT_CACHE_DIR`, `TRTLLM_DG_CACHE_DIR`, and
+`CUDA_CACHE_PATH`. A cache-specific variable that is already set takes
+precedence over the derived location.
 
-An explicitly configured `FLASHINFER_WORKSPACE_BASE` takes precedence. Workers
-started outside the LLM API's dynamic MPI pool must configure their own
-workspace isolation.
+During endpoint startup, rank 0 holds one initialization lock in each shared
+cache directory until all ranks finish backend construction and warmup. A later
+endpoint using the same root waits for those caches to become complete. The
+default lock timeout is 600 seconds; set `TRTLLM_CACHE_LOCK_TIMEOUT` to a
+non-negative number of seconds to change it. Use different cache roots for
+endpoints that should initialize independently.
+
+The configuration is applied before TensorRT-LLM imports Torch and is reranked
+in dynamically spawned MPI workers before they import the user's worker code.
+If `TRTLLM_CACHE_DIR` is unset, cache behavior is unchanged. In particular, the
+legacy opt-in `TRTLLM_FLASHINFER_WORKSPACE_PER_PROCESS=1` continues to isolate
+FlashInfer workspaces for dynamically spawned multi-rank MPI pools.
 
 ### Cannot quit after generation
 

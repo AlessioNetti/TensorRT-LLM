@@ -11,6 +11,11 @@ import zmq
 
 from tensorrt_llm.logger import logger
 
+from .._cache import (acquire_cache_initialization_locks,
+                      cache_initialization_lock_if_unmanaged,
+                      cache_lock_timeout, mark_cache_lock_managed,
+                      release_cache_initialization_locks, unified_cache_enabled,
+                      unmark_cache_lock_managed)
 from .._utils import mpi_comm, mpi_rank, print_all_stacks
 from ..bindings import executor as tllm
 from ..llmapi.llm_args import BaseLlmArgs
@@ -64,7 +69,8 @@ class GenerationExecutorWorker(RpcWorkerMixin, BaseWorker):
                 and getattr(self.llm_args, "enable_resource_governor", False)):
             self._resource_governor_queue = IntraProcessQueue()
 
-        self.setup_engine()
+        with cache_initialization_lock_if_unmanaged():
+            self.setup_engine()
 
         # Setup RPC server for stats (skip init_rpc_worker to keep IPC response queue)
         # Only set up if rpc_addr is provided (for stats RPC support)
@@ -190,6 +196,16 @@ def worker_main(
     rpc_addr: Optional[str] = None,
     hmac_key: bytes = b"",
 ) -> None:
+
+    def _wait_for_cache_initialization() -> None:
+        barrier = mpi_comm().Ibarrier()
+        deadline = time.monotonic() + cache_lock_timeout()
+        while not barrier.Test():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Timed out waiting for all ranks to initialize their caches"
+                )
+            time.sleep(0.1)
 
     def _print_stacks():
         counter = 0
@@ -359,6 +375,28 @@ def worker_main(
 
     logger_debug(f"Worker {mpi_rank()} ready to setup backend...\n", "green")
 
+    cache_locks_enabled = unified_cache_enabled()
+    cache_lock_error = None
+    if cache_locks_enabled and is_leader:
+        try:
+            acquire_cache_initialization_locks()
+        except (OSError, TimeoutError, ValueError) as error:
+            cache_lock_error = str(error)
+    if cache_locks_enabled:
+        cache_lock_error = mpi_comm().bcast(cache_lock_error, root=0)
+        if cache_lock_error is not None:
+            error = RuntimeError(cache_lock_error)
+            logger.error(
+                f"Failed to acquire cache initialization locks: {error}")
+            if is_leader:
+                error_msg = (error, cache_lock_error)
+                if not worker_init_status_queue.notify_with_retry(error_msg):
+                    logger.error("Failed to deliver error message to proxy")
+            return
+        # GenerationExecutorWorker must not reacquire the leader's endpoint-wide
+        # lease. In particular, subordinate ranks must never contend with rank 0.
+        mark_cache_lock_managed()
+
     try:
         worker: GenerationExecutorWorker = worker_cls(
             engine,
@@ -371,6 +409,10 @@ def worker_main(
             llm_args=llm_args,
             rpc_addr=rpc_addr,
             hmac_key=hmac_key)
+        if cache_locks_enabled:
+            # All ranks have completed backend construction and warmup before
+            # the endpoint makes the shared cache available to another launch.
+            _wait_for_cache_initialization()
     except Exception as e:
         logger.error(f"Failed to initialize executor on rank {mpi_rank()}: {e}")
         logger.error(traceback.format_exc())
@@ -380,7 +422,16 @@ def worker_main(
             error_msg = (e, traceback.format_exc())
             if not worker_init_status_queue.notify_with_retry(error_msg):
                 logger.error("Failed to deliver error message to proxy")
+        if cache_locks_enabled and is_leader:
+            release_cache_initialization_locks()
+        if cache_locks_enabled:
+            unmark_cache_lock_managed()
         return
+
+    if cache_locks_enabled:
+        if is_leader:
+            release_cache_initialization_locks()
+        unmark_cache_lock_managed()
 
     # Optionally disable GC (default: not disabled)
     if os.getenv("TRTLLM_WORKER_DISABLE_GC", "0") == "1":
