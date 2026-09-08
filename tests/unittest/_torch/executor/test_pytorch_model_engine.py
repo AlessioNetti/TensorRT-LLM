@@ -261,6 +261,7 @@ def _make_forward_only_engine(
     engine._get_draft_kv_cache_manager = Mock(return_value=None)
     engine.cuda_graph_lora_manager = None
     engine._force_lora_graph_for_capture = None
+    engine._phase_selective_forward = None
 
     semantic_attn_metadata = Mock()
     graph_attn_metadata = Mock()
