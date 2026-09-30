@@ -204,13 +204,16 @@ StorageConfig createStorageConfig(KVCacheManagerConfig const& config)
         slotGroups.push_back(std::move(var));
     }
 
-    // Merge SlotDescVariants that share the same slotSizeList.
-    // Key: tuple of sizes (sorted desc).
-    std::map<std::vector<size_t>, std::vector<SlotDescVariant>> poolGroupsBySizes;
+    // Equal-sized slots with different reuse policies need independent pools
+    // and eviction queues. Keep ordinary SSM/REQUIRED grouping unchanged.
+    using PoolKey = std::pair<AttentionReusePolicy, std::vector<size_t>>;
+    std::map<PoolKey, std::vector<SlotDescVariant>> poolGroupsBySizes;
     for (auto& sg : slotGroups)
     {
         auto sizes = sg.slotSizeList();
-        poolGroupsBySizes[sizes.raw()].push_back(std::move(sg));
+        auto const* attn = std::get_if<AttnLifeCycle>(&registry[sg.lifeCycleId]);
+        auto const policy = attn ? attn->reusePolicy : AttentionReusePolicy::REQUIRED;
+        poolGroupsBySizes[{policy, sizes.raw()}].push_back(std::move(sg));
     }
 
     StorageConfig out;
